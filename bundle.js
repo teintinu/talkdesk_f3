@@ -78,6 +78,7 @@
 	  init: function init() {
 	    var _this = this;
 
+	    this.call_references.object_count = 0;
 	    var earth = new WE.map('earth_div');
 	    WE.tileLayer('http://otile1.mqcdn.com/tiles/1.0.0/map/{z}/{x}/{y}.jpg', {
 	      //http://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
@@ -90,6 +91,7 @@
 	        call_reference = {
 	          release: function release() {}
 	        }, _this.call_references[call.call_id] = call_reference;
+	        _this.call_references.object_count++;
 	      }
 	      var render_function = GlobeView.render[call.event];
 	      if (render_function) render_function(earth, call, call_reference);
@@ -98,14 +100,9 @@
 	  render: {
 	    call_initiated: function call_initiated(earth, call, reference) {
 	      reference.release();
-	      var marker = WE.marker([call.customer_location.lat, call.customer_location.long]);
-	      var div = marker.element.children[0];
-	      var s = div.getAttribute('style');
-	      s = s.replace(/(width|height):\s*\w+px\s*;\s*/g, '');
-	      div.setAttribute('style', '');
-	      div.classList.add('call_initiated_marker');
+	      var marker = createSpecialMarker(call, 'call_initiated_marker');
 	      marker.addTo(earth);
-	      if (GlobeView.config.fly_to_last_events) earth.panTo([call.customer_location.lat, call.customer_location.long]);
+	      if (GlobeView.config.fly_to_last_events && GlobeView.call_references.object_count < 10) earth.panTo([call.customer_location.lat, call.customer_location.long]);
 	      reference.release = function () {
 	        marker.removeFrom(earth);
 	      };
@@ -114,24 +111,74 @@
 	      if (reference.link) return;
 	      reference.release();
 
-	      reference.link = WE.polygon([[call.customer_location.lat, call.customer_location.long], [call.agent_location.lat, call.agent_location.long], [call.customer_location.lat, call.customer_location.long]], {
-	        color: '#ff0000',
-	        opacity: 1,
-	        fillColor: '#ff0000',
-	        fillOpacity: 1,
+	      var points = [];
+	      createLine(points, call.customer_location, call.agent_location);
+	      createLine(points, call.agent_location, call.customer_location);
+
+	      reference.link = WE.polygon(points, {
+	        color: '#3A99D0',
+	        opacity: 0.6,
+	        fillColor: '#3A99D0',
+	        fillOpacity: 0.6,
 	        editable: false,
-	        weight: 2
+	        weight: 1
 	      });
 
-	      reference.link.addTo(earth);
+	      reference.poly = reference.link.addTo(earth);
 
 	      reference.release = function () {
-	        reference.link.removeFrom(earth);
+	        reference.poly.destroy();
+	        delete reference.link;
+	        delete reference.poly;
 	      };
+	    },
+	    call_finished: function call_finished(earth, call, reference) {
+	      delete GlobeView.call_references[call.call_id];
+	      GlobeView.call_references.object_count--;
+	      reference.release();
 	    }
 	  }
 	});
 
+	function createSpecialMarker(call, cssClass) {
+	  var marker = WE.marker([call.customer_location.lat, call.customer_location.long]);
+	  var div = marker.element.children[0];
+	  var s = div.getAttribute('style');
+	  s = s.replace(/(width|height):\s*\w+px\s*;\s*/g, '');
+	  div.setAttribute('style', '');
+	  div.classList.add(cssClass);
+	  return marker;
+	}
+
+	function createLine(points, start, end) {
+	  var comp_lat = end.lat > start.lat ? function (l, r) {
+	    return l < r;
+	  } : function (l, r) {
+	    return l > r;
+	  };
+	  var comp_long = end.long > start.long ? function (l, r) {
+	    return l < r;
+	  } : function (l, r) {
+	    return l > r;
+	  };
+
+	  var lat = start.lat;
+	  var long = start.long;
+
+	  var dlat = (end.lat - lat) / 100;
+	  if (Math.abs(dlat) < 0.00001) lat = end.lat;
+	  var dlong = (end.long - long) / 100;
+	  if (Math.abs(dlong) < 0.00001) long = end.long;
+
+	  while (comp_lat(lat, end.lat) && comp_long(long, end.long)) {
+	    points.push([lat, long]);
+	    lat += dlat;
+	    if (!comp_lat(lat, end.lat)) lat = end.lat;
+	    long += dlong;
+	    if (!comp_long(long, end.long)) long = end.long;
+	  }
+	  points.push([end.lat, end.long]);
+	}
 	module.exports = GlobeView;
 
 /***/ },
@@ -546,13 +593,15 @@
 
 	var _SimulationModeRandom2 = _interopRequireDefault(_SimulationModeRandom);
 
-	var _SimulationModeCaseOneCall = __webpack_require__(227);
+	var _SimulationModeFirstCase = __webpack_require__(227);
 
-	var _SimulationModeCaseOneCall2 = _interopRequireDefault(_SimulationModeCaseOneCall);
+	var _SimulationModeFirstCase2 = _interopRequireDefault(_SimulationModeFirstCase);
 
 	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
 	__webpack_require__(228);
+
+	window.addEventListener("hashchange", HandleHashChange, false);
 
 	exports.default = {
 	  get mode() {
@@ -560,7 +609,7 @@
 	  },
 	  set mode(value) {
 	    if (!CallsSimulator.modes[value]) throw new Error('Invalid simulation mode: ' + value);
-	    CallsSimulator.mode = value;
+	    CallsSimulator.set_mode(value);
 	  },
 	  enable: function init_simulator() {
 	    CallsSimulator.start_simulations();
@@ -575,15 +624,19 @@
 	  enabled: false,
 	  mode: 'Random',
 	  incoming_calls_per_minute: 10,
-	  number_of_agents: 10,
-	  call_duration_avg_in_seconds: 1,
+	  number_of_agents: 5,
+	  call_duration_avg_in_seconds: 30,
 	  agents: [],
 	  modes: {
 	    Random: _SimulationModeRandom2.default,
-	    CaseOneCall: _SimulationModeCaseOneCall2.default
+	    FirstCase: _SimulationModeFirstCase2.default
 	  },
 	  calls_in_progress: [],
 
+	  set_mode: function set_mode(new_mode) {
+	    this.modes[new_mode].reset.apply(this);
+	    this.mode = new_mode;
+	  },
 	  start_simulations: function start_simulations() {
 	    this.enabled = true;
 	    this.incoming_call_simulation();
@@ -621,9 +674,11 @@
 	      var try_answer_another_call = false;
 	      if (agent) {
 	        agent.state = 'busy';
+	        call.agent = agent;
 	        call.agent_id = agent.agent_id;
 	        call.agent_location = agent.location;
 	        call.event = 'call_answered';
+	        call.duration = 0;
 	        call.answered_timestamp = new Date();
 	        _GlobeCtrl2.default.notify(call);
 	      }
@@ -633,7 +688,37 @@
 	  call_finished_simulation: function call_finished_simulation() {
 	    if (!this.enabled) return;
 
-	    var mode = this.modes[this.mode];
+	    var variation = (Math.random() - 0.5) / 5;
+	    var min_duration = Math.floor(this.call_duration_avg_in_seconds * (1 + variation));
+	    this.calls_in_progress.filter(function (call) {
+	      if (call.event === 'call_answered') {
+	        call.duration = (new Date().getTime() - call.answered_timestamp.getTime()) / 1000;
+	        return call.duration >= min_duration;
+	      }
+	    }).forEach(hangup_the_call);
+
+	    fire_agents();
+
+	    function hangup_the_call(call) {
+	      var i = CallsSimulator.calls_in_progress.indexOf(call);
+	      CallsSimulator.calls_in_progress.splice(i, 1);
+	      if (call.agent) call.agent.state = 'idle';
+	      call.duration = (new Date().getTime() - call.answered_timestamp.getTime()) / 1000;
+	      call.event = 'call_finished';
+	      _GlobeCtrl2.default.notify(call);
+	    }
+
+	    function fire_agents() {
+	      while (CallsSimulator.agents.length > CallsSimulator.number_of_agents) {
+	        var someone_was_fired = CallsSimulator.agents.some(function (agent, idx) {
+	          if (agent.state === 'idle') {
+	            CallsSimulator.agents.splice(idx, 1);
+	            return true;
+	          }
+	        });
+	        if (!someone_was_fired) break;
+	      }
+	    }
 	  },
 	  find_an_idle_agent: function find_an_idle_agent() {
 	    var agent;
@@ -646,6 +731,14 @@
 	    return agent;
 	  }
 	};
+
+	function HandleHashChange() {
+	  if (/^#mode\//.test(location.hash)) {
+	    var mode = location.hash.substring(6);
+	    if (CallsSimulator.modes[mode]) CallsSimulator.set_mode(mode);
+	  }
+	}
+	HandleHashChange();
 
 /***/ },
 /* 8 */
@@ -20375,11 +20468,10 @@
 
 	'use strict';
 
-	var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
-
 	Object.defineProperty(exports, "__esModule", {
 	  value: true
 	});
+	exports.default = CallsSimulatorView;
 
 	var _react = __webpack_require__(8);
 
@@ -20390,12 +20482,6 @@
 	var _rcSlider2 = _interopRequireDefault(_rcSlider);
 
 	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-	function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
-
-	function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
-
-	function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
 
 	var style = { width: 200, margin: 30 };
 	var incoming_calls_marks = {
@@ -20409,96 +20495,85 @@
 	  8: 6000
 	};
 
-	var CallsSimulatorView = function (_Component) {
-	  _inherits(CallsSimulatorView, _Component);
+	function CallsSimulatorView(props) {
+	  return _react2.default.createElement(
+	    'div',
+	    null,
+	    _react2.default.createElement(
+	      'h2',
+	      null,
+	      'Simulator'
+	    ),
+	    _react2.default.createElement(
+	      'div',
+	      { style: style },
+	      _react2.default.createElement(
+	        'label',
+	        null,
+	        'Incoming calls (per minute)'
+	      ),
+	      _react2.default.createElement(_rcSlider2.default, {
+	        defaultValue: get_mark_idx(incoming_calls_marks, props.CallsSimulator.incoming_calls_per_minute),
+	        included: false,
+	        min: 1,
+	        max: 8,
+	        step: null,
+	        marks: incoming_calls_marks,
+	        onChange: handleIncomingCallsPerMinuteChange })
+	    ),
+	    _react2.default.createElement(
+	      'div',
+	      { style: style },
+	      _react2.default.createElement(
+	        'label',
+	        null,
+	        'Agents working'
+	      ),
+	      _react2.default.createElement(_rcSlider2.default, {
+	        defaultValue: props.CallsSimulator.number_of_agents,
+	        min: 1,
+	        max: 100,
+	        onChange: handleNumberOfAgentsChange })
+	    ),
+	    _react2.default.createElement(
+	      'div',
+	      { style: style },
+	      _react2.default.createElement(
+	        'label',
+	        null,
+	        'Call duration (average in minutes)'
+	      ),
+	      _react2.default.createElement(_rcSlider2.default, {
+	        defaultValue: props.CallsSimulator.call_duration_avg_in_seconds,
+	        min: 1,
+	        max: 200,
+	        onChange: handleCallDurationChange })
+	    )
+	  );
 
-	  function CallsSimulatorView() {
-	    _classCallCheck(this, CallsSimulatorView);
-
-	    return _possibleConstructorReturn(this, Object.getPrototypeOf(CallsSimulatorView).apply(this, arguments));
+	  function get_mark_idx(marks, value) {
+	    var ret = 1;
+	    Object.keys(marks).some(function (idx) {
+	      if (marks[idx] == value) {
+	        ret = idx;
+	        return true;
+	      }
+	    });
+	    return parseInt(ret);
 	  }
 
-	  _createClass(CallsSimulatorView, [{
-	    key: 'render',
-	    value: function render() {
-	      return _react2.default.createElement(
-	        'div',
-	        null,
-	        _react2.default.createElement(
-	          'h2',
-	          null,
-	          'Simulator'
-	        ),
-	        _react2.default.createElement(
-	          'div',
-	          { style: style },
-	          _react2.default.createElement(
-	            'label',
-	            null,
-	            'Incoming calls (per minute)'
-	          ),
-	          _react2.default.createElement(_rcSlider2.default, {
-	            defaultValue: this.get_mark_idx(incoming_calls_marks, this.props.CallsSimulator.incoming_calls_per_minute),
-	            included: false,
-	            min: 1,
-	            max: 8,
-	            step: null,
-	            marks: incoming_calls_marks,
-	            onChange: this.handleIncomingCallsPerMinuteChange })
-	        ),
-	        _react2.default.createElement(
-	          'div',
-	          { style: style },
-	          _react2.default.createElement(
-	            'label',
-	            null,
-	            'Agents working'
-	          ),
-	          _react2.default.createElement(_rcSlider2.default, {
-	            defaultValue: this.props.CallsSimulator.number_of_agents,
-	            min: 1,
-	            max: 100,
-	            onChange: this.handleChange })
-	        ),
-	        _react2.default.createElement(
-	          'div',
-	          { style: style },
-	          _react2.default.createElement(
-	            'label',
-	            null,
-	            'Call duration (average in minutes)'
-	          ),
-	          _react2.default.createElement(_rcSlider2.default, {
-	            defaultValue: this.props.CallsSimulator.call_duration_avg_in_seconds,
-	            min: 1,
-	            max: 200,
-	            onChange: this.handleChange })
-	        )
-	      );
-	    }
-	  }, {
-	    key: 'get_mark_idx',
-	    value: function get_mark_idx(marks, value) {
-	      var ret;
-	      Object.keys(marks).some(function (idx) {
-	        if (marks[idx] == value) {
-	          ret = idx;
-	          return true;
-	        }
-	      });
-	      return ret;
-	    }
-	  }, {
-	    key: 'handleIncomingCallsPerMinuteChange',
-	    value: function handleIncomingCallsPerMinuteChange(value) {
-	      CallsSimulator.incoming_calls_per_minute = incoming_calls_marks[value];
-	    }
-	  }]);
+	  function handleIncomingCallsPerMinuteChange(value) {
+	    props.CallsSimulator.incoming_calls_per_minute = incoming_calls_marks[value];
+	  }
 
-	  return CallsSimulatorView;
-	}(_react.Component);
+	  function handleNumberOfAgentsChange(value) {
+	    props.CallsSimulator.number_of_agents = value;
+	  }
 
-	exports.default = CallsSimulatorView;
+	  function handleCallDurationChange(value) {
+	    props.CallsSimulator.call_duration_avg_in_seconds = value;
+	  }
+	}
 
 /***/ },
 /* 168 */
@@ -26574,6 +26649,7 @@
 	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
 	var singleton = {
+	  reset: function reset() {},
 	  incoming_call_simulation: function incoming_call_simulation() {
 	    var call = {
 	      call_id: _guid2.default.create().value,
@@ -26587,7 +26663,7 @@
 	    return {
 	      agent_id: _guid2.default.create().value,
 	      state: 'idle',
-	      location: _SomePlace2.default.randomCity()
+	      location: _SomePlace2.default.randomCity(['San Francisco, CA, USA', 'Lisbon, Portugal'])
 	    };
 	  }
 	};
@@ -26615,17 +26691,22 @@
 	    });
 	    return ret;
 	  },
-	  randomCity: function randomCity() {
-	    var i = Math.floor(this.cities.length * Math.random());
-	    return this.cities[i];
+	  randomCity: function randomCity(cities) {
+	    if (cities) {
+	      var i = Math.floor(cities.length * Math.random());
+	      return this.find(cities[i]);
+	    } else {
+	      var i = Math.floor(this.cities.length * Math.random());
+	      return this.cities[i];
+	    }
 	  },
 
 	  cities: deremerCities().map(function (city) {
 	    var ll = city.ll.split(',');
 	    return {
 	      name: city.city,
-	      lat: ll[0],
-	      long: ll[1]
+	      lat: parseFloat(ll[0]),
+	      long: parseFloat(ll[1])
 	    };
 	  })
 	};
@@ -26658,30 +26739,31 @@
 	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
 	var singleton = {
+	  reset: function reset() {
+	    this.number_of_agents = 1, this.call_duration_avg_in_seconds = 4, singleton.incoming_calls = ['Goiânia - Goiás, Brazil'];
+	    singleton.agents_to_hire = ['Lisbon, Portugal'];
+	  },
 	  incoming_call_simulation: function incoming_call_simulation() {
-	    if (incoming_calls.length) {
+	    if (singleton.incoming_calls.length) {
 	      var call = {
 	        call_id: _guid2.default.create().value,
 	        event: 'call_initiated',
-	        customer_location: _SomePlace2.default.find(incoming_calls.shift()),
+	        customer_location: _SomePlace2.default.find(singleton.incoming_calls.shift()),
 	        initiated_timestamp: new Date()
 	      };
 	      return call;
 	    }
 	  },
 	  recruit_agent_simulation: function recruit_agent_simulation(CallsSimulator) {
-	    if (agents_to_hire.length) {
+	    if (singleton.agents_to_hire.length) {
 	      return {
 	        agent_id: _guid2.default.create().value,
 	        state: 'idle',
-	        location: _SomePlace2.default.find(agents_to_hire.shift())
+	        location: _SomePlace2.default.find(singleton.agents_to_hire.shift())
 	      };
 	    }
 	  }
 	};
-
-	var incoming_calls = ['Goiânia - Goiás, Brazil'];
-	var agents_to_hire = ['Lisbon, Portugal'];
 
 	exports.default = singleton;
 
